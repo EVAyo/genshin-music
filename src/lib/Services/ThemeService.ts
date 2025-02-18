@@ -1,52 +1,70 @@
-import { APP_NAME } from "appConfig"
-import { Theme } from "stores/ThemeStore"
-import { DbInstance } from "./Database"
+import {APP_NAME} from "$config"
+import {SerializedTheme, ThemeProvider} from "$stores/ThemeStore/ThemeProvider"
+import {Query} from "./Database/Collection"
+import {DbInstance} from "./Database/Database"
 
 
-class ThemeService{
+class ThemeService {
     themeCollection = DbInstance.collections.themes
-    async getTheme(id:string):Promise<Theme|null>{
-        const theme = await this.themeCollection.findOne({id}) as Theme
-        if(theme){
+
+    async getTheme(id: string): Promise<SerializedTheme | null> {
+        const theme = await this.themeCollection.findOneById(id)
+        if (theme) {
             //@ts-ignore
-            delete theme.id
+            const legacyId = theme.other.id
+            theme.type = 'theme'
+            theme.id = (theme.id || legacyId) ?? null
             //@ts-ignore
             delete theme._id
         }
         return theme
     }
-    async getThemes(): Promise<Theme[]>{
-        const themes = (await this.themeCollection.find({}).toArray()) as Theme[]
+
+    async getThemes(): Promise<SerializedTheme[]> {
+        const themes = await this.themeCollection.find({})
+        //legacy format
         themes.forEach(theme => {
             //@ts-ignore
-            delete theme.id
+            const legacyId = theme.other.id
+            theme.type = 'theme'
+            theme.id = (theme.id || legacyId) ?? null
             //@ts-ignore
             delete theme._id
         })
-        return themes
+        return themes.map(theme => ThemeProvider.sanitize(theme))
     }
-    async addTheme(theme:Theme){
+
+    async addTheme(theme: SerializedTheme) {
         const id = DbInstance.generateId()
-        theme.other.id = id
-        await this.themeCollection.insert({...theme, id })
+        theme.id = id
+        await this.themeCollection.insert(theme)
         return id
     }
-    updateTheme(id:string,data:Theme){
-        return this.themeCollection.update({id},data)
+
+    updateTheme(id: string, data: SerializedTheme) {
+        data.id = id
+        return this.themeCollection.updateById(id, data)
     }
-    removeTheme(query:any){
+
+    removeTheme(query: Query<SerializedTheme>) {
         return this.themeCollection.remove(query)
     }
-    getCurrentThemeId(){
+
+    removeThemeById(id: string) {
+        return this.themeCollection.removeById(id)
+    }
+
+    getCurrentThemeId() {
         return localStorage.getItem(APP_NAME + '_Theme')
     }
-    setCurrentThemeId(id: string){
-        localStorage.setItem(APP_NAME + '_Theme', id)
+
+    setCurrentThemeId(id: string | null) {
+        localStorage.setItem(APP_NAME + '_Theme', id ?? '')
+    }
+
+    _clearAll() {
+        return this.themeCollection.remove({})
     }
 }
 
-const themeService = new ThemeService()
-
-export {
-    themeService
-}
+export const _themeService = new ThemeService()

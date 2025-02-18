@@ -1,142 +1,244 @@
-import { APP_NAME } from "appConfig"
-import { ComposedSong } from "lib/Songs/ComposedSong"
-import { RecordedSong } from "lib/Songs/RecordedSong"
-import { Column, ColumnNote, RecordedNote } from "lib/Songs/SongClasses"
-import { getNoteText } from "lib/Tools"
-import { NoteLayer } from "../Layer"
+import {APP_NAME, NoteNameType} from "$config"
+import {ComposedSong} from "$lib/Songs/ComposedSong"
+import {RecordedSong} from "$lib/Songs/RecordedSong"
+import {ColumnNote, NoteColumn, RecordedNote} from "$lib/Songs/SongClasses"
+import {Instrument} from '$lib/audio/Instrument'
+import {Song} from "./Song"
 
 const THRESHOLDS = {
     joined: 50,
     pause: 400,
 }
-type NoteDifference = {
-    delay: number
-    index: number
-    layer: NoteLayer
-    time: number
-}
-function getChunkNoteText(i: number) {
-    const text = getNoteText(APP_NAME === 'Genshin' ? 'Keyboard layout' : 'ABC', i, 'C', APP_NAME === "Genshin" ? 21 : 15)
+
+
+const defaultInstrument = new Instrument()
+
+function getNoteText(index: number, layout: NoteNameType) {
+    const text = defaultInstrument.getNoteText(index, layout, "C")
     return APP_NAME === 'Genshin' ? text.toLowerCase() : text.toUpperCase()
 }
+
 export class VisualSong {
-    private baseChunks: _Chunk[] = []
-    type: 'song' | 'composed' = 'song'
-    chunks: _Chunk[] = []
-    text: string = ''
+    chunks: TempoChunk[] = []
+    bpm
 
-    get currentChunk() {
-        return this.baseChunks[this.baseChunks.length - 1]
+    constructor(bpm: number) {
+        this.bpm = bpm
     }
 
-    static noteDifferences(notes: RecordedNote[]) {
-        const parsed: NoteDifference[] = []
-        for (let i = 0; i < notes.length; i++) {
-            const delay = notes[i + 1] ? notes[i + 1].time - notes[i].time : 0
-            parsed.push({
-                delay,
-                index: notes[i].index,
-                time: notes[i].time,
-                layer: notes[i].layer
+    static from(song: Song | ComposedSong, flattenEmptyChunks: boolean) {
+        song = song.clone()
+        const vs = new VisualSong(song.bpm)
+        if (song instanceof RecordedSong) {
+            const first = song.notes.shift()
+            if (!first) return vs
+            const stack = [first]
+            let lastNoteTimestamp = first.time
+            for (const note of song.notes) {
+                const difference = note.time - (stack[0]?.time ?? 0)
+                if (difference <= THRESHOLDS.joined) {
+                    stack.push(note)
+                } else {
+                    const delay = note.time - lastNoteTimestamp
+                    const chunk = new TempoChunk(0, [TempoChunkColumn.from(stack.splice(0, stack.length))])
+                    vs.addChunk(chunk, delay)
+                    stack.push(note)
+                }
+                lastNoteTimestamp = note.time
+            }
+            const delay = song.notes[song.notes.length - 1].time - lastNoteTimestamp
+            const chunk = new TempoChunk(0, [TempoChunkColumn.from(stack)])
+            vs.addChunk(chunk, delay)
+            //make sure there is at least one column even in empty chunks
+            vs.chunks = vs.chunks.map(chunk => {
+                if (chunk.columns.length === 0) {
+                    chunk.columns.push(new TempoChunkColumn([]))
+                }
+                return chunk
             })
-        }
-        return parsed
-    }
-    static from(song: RecordedSong | ComposedSong) {
-        const vs = new VisualSong()
-        if(song instanceof RecordedSong){
-            vs.createChunk(0)
-        }else if(song instanceof ComposedSong){
-            const { columns } = song
-            const padding = [...columns].reverse().findIndex(column => column.notes.length)
-            const trimmed = columns.slice(0, columns.length - padding).map(column => column.clone())
-            
-            for(let i = 0; i < trimmed.length; i++){
-                const column = trimmed[i]
-                if(column.tempoChanger === vs.currentChunk?.tempoChanger){
-                    vs.currentChunk.addColumn(ChunkColumn.from(column))
-                }else{
-                    vs.currentChunk.addColumn(ChunkColumn.from(column))
-                    vs.createChunk(column.tempoChanger as ChunkTempoChanger)
+        } else if (song instanceof ComposedSong) {
+            const columns = song.columns
+            const first = columns[0]
+            if (!first) return vs
+            const stack: NoteColumn[] = []
+            let lastTempoChanger = first.tempoChanger
+            for (const column of columns) {
+                if (lastTempoChanger === 0 && column.tempoChanger === 0) {
+                    vs.addChunk(TempoChunk.from([column]), 0)
+                } else if (lastTempoChanger > column.tempoChanger) {
+                    stack.push(column)
+                    const chunk = TempoChunk.from(stack.splice(0, stack.length))
+                    chunk.endingTempoChanger = column.tempoChanger
+                    vs.addChunk(chunk, 0)
+
+                } else if (lastTempoChanger < column.tempoChanger) {
+                    if (lastTempoChanger === 0) {
+                        stack.push(column)
+                    } else {
+                        vs.addChunk(TempoChunk.from(stack.splice(0, stack.length)), 0)
+                        stack.push(column)
+                    }
+                } else {
+                    stack.push(column)
+                }
+                lastTempoChanger = column.tempoChanger
+            }
+            if (stack.length) vs.addChunk(TempoChunk.from(stack.splice(0, stack.length)), 0)
+            //remove padding from start and end
+            let lastChunkWithNotes = -1
+            for (let i = 0; i < vs.chunks.length; i++) {
+                const chunk = vs.chunks[i]
+                if (chunk.columns.some(column => column.notes.length > 0)) {
+                    if (lastChunkWithNotes === -1) {
+                        vs.chunks.splice(0, i)
+                        i = 0
+                    }
+                    lastChunkWithNotes = i
                 }
             }
+            vs.chunks.splice(lastChunkWithNotes + 1)
+
+        } else {
+            console.error("Song type not supported")
         }
-        vs.finalize()
+        if (flattenEmptyChunks) {
+            let counter = 0
+            let finalChunks = [] as TempoChunk[]
+            for (const chunk of vs.chunks) {
+                if (chunk.columns.every(c => c.notes.length === 0)) {
+                    counter++
+                } else {
+                    const lastChunk = finalChunks[finalChunks.length - 1]
+                    if (lastChunk) {
+                        lastChunk.emptyAhead = counter
+                        counter = 0
+                    }
+                    finalChunks.push(chunk)
+                }
+            }
+            vs.chunks = finalChunks
+        }
         return vs
     }
-    finalize() {
-        console.log(this.baseChunks)
-        this.text = this.baseChunks.map(chunk => chunk.toString()).join(' ')
+
+    toText(type: NoteNameType) {
+        const chunks = this.chunks.map(chunk => chunk.toText(type))
+        const tokens: string[] = []
+        let empties = 0
+        for (const chunk of chunks) {
+            if (chunk === "") {
+                empties++
+            } else {
+                if (empties) {
+                    const voids = Math.round((60000 / (empties * this.bpm)) / THRESHOLDS.pause)
+                    if (voids <= 2) tokens.push(Array.from({length: voids}, () => `-`).join(" "))
+                    else tokens.push(`\n\n`.repeat(Math.round(voids / 2)))
+                    empties = 0
+                }
+                tokens.push(chunk)
+            }
+        }
+        return tokens.join(" ").trim()
     }
-    createChunk(changer?: ChunkTempoChanger){
-        const chunk = new _Chunk(changer || 1)
-        this.baseChunks.push(chunk)
-        return chunk
+
+    addChunk(chunk: TempoChunk, delay: number) {
+        const numberOfEmptyChunks = Math.floor(delay / THRESHOLDS.pause)
+        const emptyChunks = Array.from({length: numberOfEmptyChunks}, () => new TempoChunk(0, []))
+        this.chunks.push(chunk, ...emptyChunks)
     }
-    addChunk(chunk: _Chunk) {
-        this.baseChunks.push(chunk)
+}
+
+
+class TempoChunkNote {
+    note: number
+
+    constructor(note: number) {
+        this.note = note
+    }
+
+    static from(note: ColumnNote | RecordedNote) {
+        return new TempoChunkNote(
+            note.index
+        )
+    }
+
+    toText(type: NoteNameType) {
+        return `${getNoteText(this.note, type)}`
     }
 
 }
 
-class ChunkNote{
-    index: number
-    layer: number
-    constructor(index?: number, layer?: number){
-        this.index = index || 0
-        this.layer = layer || 0
+const TEMPO_CHANGERS = new Map<number, string>([
+    [0, ""],
+    [1, "*"],
+    [2, "~"],
+    [3, "^"],
+])
+const TEMPO_CHANGER_2 = new Map<number, string[]>([
+    [0, ["", ""]],
+    [1, ["(", ")"]],
+    [2, ["[", "]"]],
+    [3, ["{", "}"]],
+])
+
+class TempoChunkColumn {
+    notes: TempoChunkNote[]
+
+    constructor(notes: TempoChunkNote[]) {
+        this.notes = notes
     }
-    static from(columnNote: ColumnNote){
-        const layer = 1 + columnNote.layer.toArray().findIndex(l => l === 1)
-        const chunkNote = new ChunkNote(columnNote.index, layer)
-        return chunkNote
+
+    static from(column: NoteColumn | RecordedNote[]) {
+        if (column instanceof NoteColumn) {
+            return new TempoChunkColumn(
+                column.notes.map(note => TempoChunkNote.from(note))
+            )
+        } else {
+            return new TempoChunkColumn(
+                column.map(note => TempoChunkNote.from(note))
+            )
+        }
+    }
+
+    toText(type: NoteNameType) {
+        return this.notes.map(note => note.toText(type)).join("")
     }
 }
 
-type ChunkTempoChanger = 0 | 1 | 2 | 3
-class ChunkColumn{
-    notes: ChunkNote[] = []
+export class TempoChunk {
+    tempoChanger: number
+    columns: TempoChunkColumn[]
+    endingTempoChanger: number
+    emptyAhead: undefined | number
 
-    addNote(note: ChunkNote){
-        this.notes.push(note)
+    constructor(tempoChanger: number, columns: TempoChunkColumn[]) {
+        this.tempoChanger = tempoChanger
+        this.endingTempoChanger = tempoChanger
+        this.columns = columns
     }
-    static from(column: Column){
-        const chunkColumn = new ChunkColumn()
-        column.notes.forEach(note => {
-            chunkColumn.addNote(ChunkNote.from(note))
-        })   
-        return chunkColumn
+
+    static from(columns: NoteColumn[], tempoChanger?: number) {
+        tempoChanger = tempoChanger ?? columns[0]?.tempoChanger
+        if (tempoChanger === undefined) console.warn("tempoChanger is undefined", columns, tempoChanger)
+        return new TempoChunk(
+            tempoChanger ?? 0,
+            columns.map(column => TempoChunkColumn.from(column))
+        )
+    }
+
+    toText(type: NoteNameType) {
+        const [start, end] = TEMPO_CHANGER_2.get(this.tempoChanger) ?? ["", ""]
+        const notes = this.columns.map(column => column.toText(type)).join(" ").trim()
+        if (!notes) return ""
+        return `${start}${notes}${end}`
     }
 }
 
-const tempoChangerMap = {
-    0: '',
-    1: '*',
-    2: '~',
-    3: '^',
-}
-export class _Chunk{
-    columns: ChunkColumn[] = []
-    tempoChanger: ChunkTempoChanger
-    constructor(changer?:ChunkTempoChanger){
-        this.tempoChanger = changer || 0
-    }
-    get tempoString(){
-        return tempoChangerMap[this.tempoChanger]
-    }
-    addColumn(column: ChunkColumn){
-        this.columns.push(column)
-    }
-    toString(){
-        const notes = this.columns.map(column => column.notes).flat()
-        const text = notes.map(note => getChunkNoteText(note.index)).join('')
-        return notes.length ? text : `[${this.tempoString}${text}]`
-    }
-}
 
 export class Chunk {
     notes: RecordedNote[] = []
     delay = 0
+
     constructor(notes: RecordedNote[] = [], delay: number = 0) {
         this.notes = notes
         this.delay = delay
