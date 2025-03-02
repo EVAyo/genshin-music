@@ -1,14 +1,13 @@
-const copyDir = require('recursive-copy')
-const fs = require('fs/promises')
-const clc = require("cli-color");
-const { execSync } = require('child_process')
+import fse from 'fs-extra'
+import urlJoin from 'url-join'
+import clc from "cli-color";
+import { execSync } from 'child_process'
 const skyPath = './src/appData/sky'
 const genshinPath = './src/appData/genshin'
 const publicPath = './public'
 const chosenApp = process.argv[2]
 const date = new Date()
-const SW_VERSION = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}-${date.getHours()}-${date.getMinutes()}-${date.getSeconds()}`
-console.log(SW_VERSION)
+const SW_VERSION = `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}_${date.getHours()}-${date.getMinutes()}`
 const PATH_NAMES = {
     Sky: "skyMusic",
     Genshin: "genshinMusic"
@@ -18,53 +17,57 @@ if (!['Genshin', 'Sky', "All"].includes(chosenApp)) {
     process.exit(1)
 }
 
-async function deleteAssets() {
-    const files = await fs.readdir(publicPath)
-    await Promise.all(files.map(file => {
-        if (file !== 'assets') {
-            if (!file.includes('.')) return fs.rm(`${publicPath}/${file}`, { recursive: true })
-            return fs.unlink(`${publicPath}/${file}`)
-        }
-        return new Promise(resolve => resolve()) 
-    }))
-}
-
 
 
 async function execute() {
     const toBuild = chosenApp === "All" ? ['Sky', 'Genshin'] : [chosenApp]
-    try{
+    try {
         for (const app of toBuild) {
+            const basePath = Boolean(process.argv[3]) ? `/${PATH_NAMES[app]}` : ""
             console.log(clc.bold.yellow(`Building ${app}...`))
-            await deleteAssets()
-            await copyDir(app === "Sky" ? skyPath : genshinPath, publicPath)
-            let result = ''
+            await fse.copy(app === "Sky" ? skyPath : genshinPath, publicPath, { overwrite: true })
+            await updateManifest(basePath)
             if (process.platform === 'win32') {
                 console.log(clc.italic("Building on windows"))
-                result = execSync(
-                    `set REACT_APP_NAME=${app}&& set REACT_APP_SW_VERSION=${SW_VERSION}&& set BUILD_PATH=./build/${PATH_NAMES[app]}&& yarn build`)
+                execSync(
+                    `set NEXT_PUBLIC_APP_NAME=${app}&& set NEXT_PUBLIC_SW_VERSION=${SW_VERSION}&& set BUILD_PATH=./build/${PATH_NAMES[app]}&& set NEXT_PUBLIC_BASE_PATH=${basePath}&& npm run build`,
+                    { stdio: 'inherit' }
+                )
             } else {
                 console.log(clc.italic("Building on Linux"))
-                result = execSync(
-                    `REACT_APP_NAME=${app} BUILD_PATH=./build/${PATH_NAMES[app]} REACT_APP_SW_VERSION=${SW_VERSION} yarn build`)
+                execSync(
+                    `NEXT_PUBLIC_APP_NAME=${app} BUILD_PATH=./build/${PATH_NAMES[app]} NEXT_PUBLIC_SW_VERSION=${SW_VERSION} NEXT_PUBLIC_BASE_PATH=${basePath} npm run build`,
+                    { stdio: 'inherit' }
+                )
             }
             console.log(clc.green(`${app} build complete \n`))
-            console.log(result.toString())
         }
         console.log(clc.bold.green("Build complete \n"))
-    }catch(e){
-        console.log("ERROR:")
-        process.stdout.write(e.toString())
-        const stderr = e.stderr
-        if (stderr){
-            console.log("STD ERR:")
-            process.stdout.write(stderr.toString())
+        process.exit(0)
+    } catch (e) {
+        console.log(clc.red("[Error]: There was an error building"))
+        console.error(e)
+        process.exit(1)
+    }
+}
+
+async function updateManifest(basePath) {
+    try {
+        const manifest = await fse.readJson('./public/manifest.json')
+        if (manifest.icons) manifest.icons = manifest.icons.map(icon => ({ ...icon, src: urlJoin(basePath, icon.src) }))
+        if (manifest.start_url) manifest.start_url = basePath || "."
+        if (manifest.screenshots) manifest.screenshots = manifest.screenshots.map(screenshot => ({ ...screenshot, src: urlJoin(basePath, screenshot.src) }))
+        if (manifest.file_handlers) {
+            manifest.file_handlers = manifest.file_handlers.map(handler => {
+                const icons = handler.icons.map(icon => ({ ...icon, src: urlJoin(basePath, icon.src) }))
+                const action = basePath || "."
+                return { ...handler, icons, action }
+            })
         }
-        const stdout = e.stdout
-        if(stdout){
-            console.log("STD OUT:")
-            process.stdout.write(stdout.toString())
-        }
+        await fse.writeFile('./public/manifest.json', JSON.stringify(manifest, null, 2))
+    } catch (e) {
+        console.log(clc.red("[Error]: There was an error updating the manifest"))
+        console.error(e)
         process.exit(1)
     }
 }

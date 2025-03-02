@@ -1,26 +1,33 @@
-import { useEffect, useRef } from "react";
+import {useEffect, useRef} from "react";
 
 
 type Callback = (e: MouseEvent) => void
+
 interface Options {
     active: boolean
     ignoreFocusable: boolean
 }
+
 export default function useClickOutside<T extends HTMLElement>(callback: Callback, options?: Partial<Options>) {
     const callbackRef = useRef<Function>();
     const innerRef = useRef<T>(null);
 
-    useEffect(() => { callbackRef.current = callback; });
+    //i have no idea why this is here, but i'm too scared to remove it
+    useEffect(() => {
+        callbackRef.current = callback;
+    });
 
     useEffect(() => {
-        if(!options?.active) return
+        if (!options?.active) return
+
         function onClick(e: any): void {
             const clickedOutside = !(innerRef.current?.contains(e.target));
             if (clickedOutside) {
-                if(options?.ignoreFocusable && hasFocusable(e)) return
+                if (options?.ignoreFocusable && hasFocusable(e)) return
                 callbackRef.current?.(e);
             }
         }
+
         document.addEventListener("click", onClick);
         return () => {
             document.removeEventListener("click", onClick);
@@ -29,8 +36,18 @@ export default function useClickOutside<T extends HTMLElement>(callback: Callbac
 
     return innerRef;
 }
-export function hasFocusable(e: MouseEvent){
+
+export function hasFocusable(e: MouseEvent) {
     const path = e.composedPath()
     //@ts-ignore
-    return path.some(e => e.tagName === "INPUT" || e.tagName === "BUTTON" || e.classList?.contains?.("ignore_click_outside"))
+    return path.some(e => {
+        //@ts-ignore
+        if (e.tagName === "INPUT" || e.tagName === "BUTTON") return !e.classList?.contains?.("include_click_outside")
+        //@ts-ignore
+        return e.classList?.contains?.("ignore_click_outside")
+    })
 }
+
+export const IGNORE_CLICK_CLASS = 'ignore_click_outside'
+
+

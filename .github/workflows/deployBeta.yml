@@ -1,0 +1,42 @@
+name: Beta Deploy
+on:
+  push:
+    branches:
+      - Dev
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Void
+        default: v0
+        required: false
+        
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: write
+    name: Deploy
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 20.2.0
+      - name: Build
+        run: npm i && npm run build:all
+        env:
+          CI: false
+          NEXT_PUBLIC_IS_BETA: true
+      - name: Publish Genshin Music Nightly Beta
+        uses: cloudflare/wrangler-action@2.0.0
+        with:
+          apiToken: ${{ secrets.CF_PAGES_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          command: pages publish ./build/genshinMusic --project-name=beta-genshin-music-nightly
+      - name: Publish Sky Music Nightly Beta
+        uses: cloudflare/wrangler-action@2.0.0
+        with:
+          apiToken: ${{ secrets.CF_PAGES_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          command: pages publish ./build/skyMusic --project-name=beta-sky-music-nightly
